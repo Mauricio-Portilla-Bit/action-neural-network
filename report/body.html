@@ -1,0 +1,162 @@
+<header class="top">
+  <p class="eyebrow">ActionNeuralNetwork · reporte de resultados · octubre 2026</p>
+  <h1>Redes entrenadas con el principio de acción, sin datos: del tiro parabólico a potenciales arbitrarios</h1>
+  <p class="lead">El proyecto original entrena una red que mapea condiciones iniciales a la trayectoria completa usando sólo el Lagrangiano. Funciona, pero tarda 500&nbsp;000 pasos en aprender una parábola. Este reporte explica por qué, lo corrige con una reformulación de la pérdida que no cambia la física, y lleva la idea hasta una sola red que integra potenciales que nunca vio.</p>
+  <div class="tiles">
+    <div class="tile"><b>__SPEED__×</b><span>menos pasos de entrenamiento para igualar el error final del modelo original en el tiro parabólico</span></div>
+    <div class="tile"><b>N⁴ → 1</b><span>número de condición de la pérdida, antes y después de integrar dos veces el residuo</span></div>
+    <div class="tile"><b>4 sistemas</b><span>no lineales resueltos sin datos, incluidos dos caóticos y uno con potencial dependiente de la velocidad</span></div>
+    <div class="tile"><b>5 potenciales</b><span>nunca vistos, integrados por una sola red entrenada únicamente con campos aleatorios</span></div>
+  </div>
+</header>
+
+<section>
+  <h2>El proyecto original, en una ecuación</h2>
+  <p>La red recibe \((q_0, v_0)\) y devuelve los \(N\) puntos \(q_1,\dots,q_N\) de la trayectoria. Con el Lagrangiano discreto de punto medio</p>
+  $$L_d(q_k,q_{k+1}) \;=\; \Delta t\; L\!\left(\tfrac{q_k+q_{k+1}}{2},\; \tfrac{q_{k+1}-q_k}{\Delta t}\right),\qquad S=\sum_{k=0}^{N-1} L_d(q_k,q_{k+1}),$$
+  <p>la pérdida pide que la acción sea estacionaria respecto a cada punto interior y que el primer paso respete el momento inicial (transformada de Legendre discreta):</p>
+  $$r_0 = p_0 + D_1L_d(q_0,q_1)=0,\qquad r_k=\frac{\partial S}{\partial q_k}=D_2L_d(q_{k-1},q_k)+D_1L_d(q_k,q_{k+1})=0 .$$
+  <p>Estas son las ecuaciones de Euler–Lagrange discretas: exactamente un integrador variacional (Marsden–West), amortizado sobre todas las condiciones iniciales. La formulación es correcta. Son \(N\) ecuaciones para \(N\) incógnitas, el último nodo queda libre como debe en un problema de valor inicial, y el término de momento de <code>original/main.ipynb</code> es la condición inicial discreta exacta. El problema está en cómo se mide el residuo.</p>
+</section>
+
+<section>
+  <h2>Diagnóstico</h2>
+
+  <h3>1. La pérdida original tiene número de condición ~N⁴</h3>
+  <p>Para una partícula libre \(r_k = -\tfrac{m}{\Delta t}(q_{k+1}-2q_k+q_{k-1})\): el residuo es una segunda diferencia. La pérdida \(\sum_k r_k^2\) tiene Hessiano \(A^\top A\) con \(A\) el operador de segunda diferencia causal, cuyo número de condición crece como \(N^2\). Elevarlo al cuadrado da \(N^4\): con \(N=25\) ya es __CN4__. El descenso por gradiente corrige rápido las oscilaciones de alta frecuencia y casi no ve los errores suaves, que son justo los que desplazan la trayectoria. Por eso el error del modelo original crece con \(t\) y por eso hacen falta cientos de miles de pasos.</p>
+  <div class="fig"><div id="f_cond"></div>
+  <p class="cap">Número de condición del Hessiano de cada pérdida para la partícula libre (calculado numéricamente). Las tres pérdidas tienen el mismo mínimo.</p></div>
+
+  <h3>2. El residuo telescopa: de Newton a Picard</h3>
+  <p>La suma acumulada del residuo se cancela término a término, porque \(D_1L_d + D_2L_d = \Delta t\,\partial L/\partial q\):</p>
+  $$\pi_k=\sum_{j\le k} r_j \;=\; \underbrace{p_0+\Delta t\sum_{j\lt k}\frac{\partial L}{\partial q}\Big|_j+\frac{\Delta t}{2}\frac{\partial L}{\partial q}\Big|_k}_{\text{momento que debería tener}} \;-\; \underbrace{\frac{\partial L}{\partial v}\Big|_k}_{\text{momento que tiene}} .$$
+  <p>Es el balance impulso–momento del intervalo \(k\). Integrando una vez más con la matriz de masa \(M=\partial^2L/\partial v^2\):</p>
+  $$c \;=\; \Delta t\,\operatorname{cumsum}\!\big(M^{-1}\pi\big)\;=\;\Phi(q)-q ,$$
+  <p>donde \(\Phi\) es el operador de Picard discreto: «integra dos veces las fuerzas evaluadas sobre la trayectoria propuesta». Las tres cantidades \(r\), \(\pi\) y \(c\) se anulan en la misma trayectoria, pero son la misma ecuación medida en tres normas: fuerza (Newton), momento e integral de posición (Picard). La pérdida nueva es simplemente</p>
+  $$\mathcal{L}_{\text{Picard}}=\big\langle \lVert \Phi(q_\theta)-q_\theta\rVert^2\big\rangle .$$
+  <ul>
+    <li><b>Condición 1 en el caso lineal.</b> Para la partícula libre \(c = q^\star - q\) exactamente: la pérdida es el error al cuadrado.</li>
+    <li><b>Unidades de posición.</b> El valor de la pérdida se lee en metros y sirve como estimador del error sin conocer la solución.</li>
+    <li><b>Sólo necesita \(L\).</b> Todo sale de \(\partial L/\partial q\), \(\partial L/\partial v\) y \(\partial^2L/\partial v^2\) por autograd; sirve igual para masas que dependen de \(q\) o potenciales que dependen de \(v\).</li>
+    <li><b>Dos formas de descender.</b> Se puede derivar a través de \(\Phi\) (gradiente completo de \(\lVert\Phi(q)-q\rVert^2\)) o tratar \(\Phi(q_\theta)\) como un blanco fijo y hacer regresión hacia él (semigradiente). Es la misma distinción que hay entre minimizar el residuo de Bellman y el aprendizaje por diferencias temporales, con \(\Phi\) en el papel del operador de Bellman. En sistemas suaves dan lo mismo; en los más no lineales sólo el semigradiente funcionó (ver péndulo doble).</li>
+    <li><b>El mismo \(c\) es un corrector.</b> \(q\leftarrow q+c\) es una iteración de Picard. Como \(\Phi\) es un operador de Volterra (causal), converge para cualquier ventana; la red sólo tiene que dar un buen punto de partida.</li>
+  </ul>
+
+  <h3>3. El término de energía empuja hacia una solución ligeramente incorrecta</h3>
+  <p>El integrador de punto medio no conserva \(T+V\) evaluada en los puntos medios al valor \(E_0\): en el tiro parabólico la solución discreta exacta tiene un sesgo constante de \(-g^2\Delta t^2/8=-0.030\) J (verificado numéricamente a 12 cifras). Penalizar \((E-E_0)^2\) con peso 100 mueve el mínimo fuera de la solución de las ecuaciones de Euler–Lagrange. El sistema ya está determinado sin ese término, así que lo eliminé.</p>
+
+  <h3>4. «Minimizar la acción» sólo es literal en problemas de contorno</h3>
+  <p>Con \(q_0\) y \(q_T\) fijos se puede usar \(S\) directamente como pérdida, sin residuos al cuadrado. Pero \(S\) sólo es un mínimo antes del primer punto conjugado; después es un punto de silla. El experimento con un oscilador armónico (\(T=1\)) lo muestra: con \(\omega T\lt\pi\) la red converge a la solución; con \(\omega T\gt\pi\) la «pérdida» cae sin cota y la trayectoria explota. Para problemas de valor inicial la formulación correcta es estacionariedad, y ahí la norma en que se mide lo decide todo.</p>
+  <div class="fig"><div id="f_bvp"></div>
+  <p class="cap">Minimización directa de la acción en un problema de contorno. La acción deja de estar acotada inferiormente al cruzar el punto conjugado \(\omega T=\pi\).</p></div>
+</section>
+
+<section>
+  <h2>Resultado 1 · El tiro parabólico original</h2>
+  <p>Mismo dominio que <code>original/main.ipynb</code> (posiciones y velocidades en ±15, \(N=25\), \(\Delta t=0.05\) s). El error es el RMSE contra la solución exacta sobre 2000 condiciones iniciales fijas.</p>
+  <div class="fig"><div id="f_proj"></div>
+  <p class="cap">Error contra pasos de entrenamiento. «Original» reproduce exactamente la arquitectura, la pérdida (λ = 20, 100, 50) y el optimizador del cuaderno. Las otras curvas cambian una cosa a la vez.</p></div>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Configuración</th><th class="n">Pasos</th><th class="n">RMSE final (m)</th><th class="n">Pasos hasta igualar al original</th></tr></thead>
+    <tbody>__PROJ_ROWS__</tbody>
+  </table></div>
+  <p>Cambiar sólo la pérdida, con la red y el optimizador originales intactos, ya da __SPEED2__× menos pasos. Añadir la condición inicial por construcción, \(q_k=q_0+t_kv_0+\tfrac12t_k^2\,a_\theta\), y normalizar entradas lleva el factor a __SPEED__×. La arquitectura nueva con la pérdida cruda no converge en 20&nbsp;000 pasos: el cuello de botella era la norma del residuo. En tiempo de reloj, la línea base tardó __ORIG_MIN__ min en CPU (88 min en el cuaderno original, en una M4), y la versión nueva completa sus 20&nbsp;000 pasos en __NEW_S__ s en la G4, con un error final 400 veces menor.</p>
+</section>
+
+<section>
+  <h2>Resultado 2 · El efecto crece con la resolución temporal</h2>
+  <p>Péndulo no lineal con \(\omega^2\) como parámetro, ventana \(T=1\), misma red y mismo presupuesto (10&nbsp;000 pasos) para todas las pérdidas. Sólo cambia \(N\).</p>
+  <div class="grid2">
+    <div class="fig"><div id="f_abl"></div><p class="cap">Error final contra \(N\). La pérdida cruda no sale del punto de partida con este presupuesto; la de momento es errática; la mezcla se degrada al refinar; las dos variantes de Picard no dependen de \(N\).</p></div>
+    <div class="fig"><div id="f_ablc"></div><p class="cap">Curvas de entrenamiento para \(N=100\).</p></div>
+  </div>
+  <p>Mezclar la norma de Picard con la de momento (curvas «Picard + momento») reintroduce el mal condicionamiento en proporción a su peso. La pérdida pura de posición es la mejor en todos los casos; la velocidad final para encadenar ventanas se obtiene aparte (ver abajo).</p>
+</section>
+
+<section>
+  <h2>Resultado 3 · Sistemas no lineales</h2>
+  <p>Una red por sistema (MLP residual 512×4, ~1.1 M de parámetros), condicionada en condiciones iniciales y parámetros físicos, entrenada con la pérdida de Picard. Cero datos: el único insumo es \(L(q,v;\theta)\). Los errores son sobre 2000 trayectorias de prueba; la referencia «exacta» es RK4 en doble precisión con paso \(\Delta t/4\).</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Sistema</th><th class="n">T / N</th><th>Gradiente</th><th class="n">RMSE por ventana</th><th class="n">relativo a la escala</th><th class="n">error propio de Δt</th><th class="n">+1 Picard</th><th class="n">+2 Picard</th><th class="n">Pasos</th></tr></thead>
+    <tbody>__SYS_ROWS__</tbody>
+  </table></div>
+  <p class="note">«Error propio de Δt» es la distancia entre el integrador variacional exacto y RK4: el piso que impone la discretización. «+k Picard» aplica k correcciones \(q\leftarrow q+c\) a la salida de la red.</p>
+
+  __DP_CMP__
+  <h3>Encadenando ventanas</h3>
+  <p>Como los sistemas son autónomos, la red de una ventana es un mapa de flujo que se compone consigo mismo. La velocidad al final de cada ventana se obtiene de tres formas: de una cabeza de la propia red («sólo red», cero evaluaciones de fuerza), del balance de impulso sobre la trayectoria predicha («red + impulso»), o tras una o dos correcciones de Picard.</p>
+  <div class="tabs" id="sys_tabs" role="tablist"></div>
+  <div class="grid2">
+    <div class="fig"><div id="f_roll"></div><p class="cap">Mediana del error de posición contra tiempo en 2000 trayectorias (banda: percentiles 10–90 del modo «sólo red»). En los sistemas caóticos todo error crece exponencialmente; lo que importa es cuánto tarda.</p></div>
+    <div class="fig"><div id="f_traj"></div><p class="cap" id="cap_traj"></p></div>
+  </div>
+  <div class="grid2">
+    <div class="fig"><div id="f_dE"></div><p class="cap">Mediana de la deriva de energía \(|E(t)-E_0|\) en los bordes de ventana.</p></div>
+    <div class="fig"><div id="f_pic"></div><p class="cap">Convergencia del corrector de Picard dentro de una ventana, partiendo de la red o del vuelo libre \(q_0+v_0t\).</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>Resultado 4 · Un operador para potenciales arbitrarios</h2>
+  <p>La pregunta de fondo era hasta dónde llega la idea con potenciales genéricos. La respuesta más ambiciosa que funcionó: dejar de darle a la red los parámetros del potencial y darle el potencial mismo.</p>
+  <ul>
+    <li><b>Entrada.</b> La velocidad inicial y los valores de \(V\) en una malla de 13×13 puntos centrada en \(q_0\). La red no ve \(q_0\) ni ninguna fórmula.</li>
+    <li><b>Simetrías usadas por construcción.</b> Traslación (la malla viaja con la partícula), gauge (\(V-V(q_0)\)) y conservación de energía: los valores se recortan por encima de la energía cinética máxima, porque la partícula no puede llegar ahí. Ese recorte es lo que permite generalizar a potenciales que crecen sin cota lejos de la partícula.</li>
+    <li><b>Entrenamiento.</b> Cada muestra de cada batch es un potencial distinto: un campo aleatorio suave más un polinomio aleatorio de grado ≤ 4. La pérdida es la de Picard. No hay trayectorias de referencia en ningún momento.</li>
+    <li><b>Prueba.</b> Cinco potenciales con nombre que no pertenecen a la distribución de entrenamiento, sin ajuste alguno.</li>
+  </ul>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Potencial (nunca visto)</th><th class="n">RMSE, 1 ventana</th><th class="n">sólo red, t=10</th><th class="n">red + impulso, t=10</th><th class="n">+1 Picard, t=10</th><th class="n">+2 Picard, t=10</th><th class="n">deriva de E, t=20 (+1)</th></tr></thead>
+    <tbody>__UNI_ROWS__</tbody>
+  </table></div>
+  <p class="note">Mediana del error de posición sobre 1000 condiciones iniciales por potencial. Unidades adimensionales: velocidades ≲ 1, ventana \(T=1\), 50 nodos. Modelo: MLP residual __UNI_W__×__UNI_D__, __UNI_STEPS__ pasos. En campos aleatorios de prueba el RMSE por ventana es __UNI_RAND__.</p>
+  <div class="trajgrid" id="uni_traj"></div>
+  <p class="cap">Cinco trayectorias por potencial hasta \(t=8\) (ocho ventanas encadenadas, modo «sólo red»). Color: red. Gris punteado: RK4. El punto marca el inicio; las curvas de nivel son del potencial.</p>
+  <div class="tabs" id="uni_tabs" role="tablist"></div>
+  <div class="grid2">
+    <div class="fig"><div id="f_uroll"></div><p class="cap">Error de posición contra tiempo en el potencial seleccionado.</p></div>
+    <div class="fig"><div id="f_upic"></div><p class="cap">La red como predictor: iteraciones de Picard necesarias partiendo de la red o del vuelo libre.</p></div>
+  </div>
+  __UNI_CMP__
+</section>
+
+<section>
+  <h2>La pérdida como certificado de error</h2>
+  <p>El defecto \(\max_k\lVert c_k\rVert\) se calcula sin conocer la solución. En todos los sistemas predice el error real dentro de un factor pequeño, trayectoria por trayectoria. En la práctica permite decidir por muestra cuándo confiar en la red y cuándo aplicar una corrección.</p>
+  <div class="grid2">
+    <div class="fig"><div id="f_cert1"></div></div>
+    <div class="fig"><div id="f_cert2"></div></div>
+  </div>
+  <p class="cap">Cada punto es una trayectoria de prueba. Eje horizontal: defecto de Picard (sin referencia). Eje vertical: error máximo real contra el integrador variacional. La diagonal es \(y=x\).</p>
+</section>
+
+<section>
+  <h2>Límites</h2>
+  <ul>
+    <li><b>Ventanas largas.</b> La dificultad de entrenamiento la controla \(\Lambda T^2\), con \(\Lambda\) la curvatura máxima del potencial. Con \(\Lambda T^2\gtrsim 15\) (péndulo con \(T=2\), campo magnético con \(BT\approx 12\)) el entrenamiento fue inestable o divergió con todas las variantes probadas. La solución fue acortar la ventana y componer.__MAGT__ Las ventanas de este reporte se eligieron después de ver esos fallos.</li>
+    <li><b>Encadenamientos que salen del dominio.</b> La red sólo es fiable donde se entrenó. En Hénon–Heiles la capa de energía es invariante y el encadenamiento es estable durante 50 unidades de tiempo. En el péndulo doble la energía se reparte entre los dos brazos, las velocidades salen del rango de entrenamiento y los errores se disparan: a \(t=20\) el __DPFAIL__ de las trayectorias con corrector ya divergió. Una trayectoria que diverge se cuenta como error infinito en las medianas.</li>
+    <li><b>Gradiente completo contra semigradiente.</b> En el péndulo doble el gradiente completo converge mucho más despacio, y con ventana \(T=1\) baja la pérdida sin bajar el error (puntos estacionarios espurios del residuo). El semigradiente no tuvo ese problema, pero tampoco es universalmente estable: en la primera versión del sistema magnético divergió; ninguna de las dos variantes fue robusta en todos los sistemas, y no tengo todavía un criterio a priori para elegir.</li>
+    <li><b>Fuerzas no acotadas.</b> La primera versión del sistema magnético usaba un campo que crece como \(r^2\) (fuerzas cúbicas en la posición). Divergió con las dos variantes de la pérdida: una predicción momentáneamente mala produce fuerzas enormes que dominan el gradiente. El sistema reportado usa un campo no uniforme pero acotado. Una pérdida robusta o un recorte de la trayectoria predicha probablemente lo resuelvan; no lo probé a fondo.</li>
+    <li><b>Precisión de la red sola.</b> El error por ventana queda en 10⁻³–10⁻⁴ relativo. Para bajar de ahí hace falta el corrector (2 iteraciones dan 10⁻⁵–10⁻⁶) u optimizadores de segundo orden, que no probé.</li>
+    <li><b>Estructura simpléctica.</b> La solución exacta del problema discreto es simpléctica; la red sólo lo es aproximadamente. La deriva de energía en encadenamientos largos es pequeña pero no acotada como en un integrador variacional.</li>
+    <li><b>El operador universal</b> está limitado por la malla: potenciales con estructura más fina que ~0.5 unidades, velocidades mayores que 1 o fuerzas que saquen a la partícula del parche en una ventana quedan fuera. La simetría de escala \(t\to\lambda t,\ V\to\lambda^2V\) permitiría cubrir velocidades arbitrarias con pasos adaptativos; no está implementado.</li>
+    <li><b>Estadística.</b> Una semilla por configuración. Las diferencias reportadas entre pérdidas son de órdenes de magnitud, pero las cifras exactas tienen esa incertidumbre.</li>
+    <li><b>Novedad.</b> No hice una revisión bibliográfica sistemática. Las piezas individuales tienen antecedentes claros: integradores variacionales, PINNs y Deep Ritz, DeepONets informados por física para integración a tiempos largos, formulaciones integrales y entrenamiento causal de PINNs. La combinación de pérdida de Euler–Lagrange discreta en norma de Picard, certificado y operador condicionado en un parche del potencial puede ser nueva, pero hay que contrastarla con la literatura antes de afirmarlo en un artículo.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Reproducir</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Archivo</th><th>Contenido</th></tr></thead>
+    <tbody>
+      <tr><td><code>varnet/</code></td><td>Sistemas (sólo \(L\)), mecánica variacional discreta, pérdidas, modelos, referencias numéricas y encadenamiento de ventanas</td></tr>
+      <tr><td><code>experiments.py</code></td><td>Todos los experimentos de este reporte: <code>python experiments.py NOMBRE [clave=valor]</code></td></tr>
+      <tr><td><code>bvp_action.py</code></td><td>Experimento de minimización directa de la acción</td></tr>
+      <tr><td><code>tests/</code></td><td>Pruebas de las identidades matemáticas (telescopado, condicionamiento, sesgo de energía)</td></tr>
+      <tr><td><code>make_report.py</code></td><td>Genera este reporte desde <code>results/*.json</code></td></tr>
+      <tr><td><code>original/</code></td><td>El proyecto de partida, sin modificar</td></tr>
+    </tbody>
+  </table></div>
+  <p>Cómputo: Google Colab, GPU G4 (RTX PRO 6000 Blackwell). En una prueba directa con este tipo de red la G4 dio 277 iteraciones/s contra 61 de la L4, a 8.9 contra 1.5 unidades por hora; para corridas largas conviene la G4, para muchas corridas pequeñas en paralelo varias L4 rinden algo más por unidad. La línea base original (500&nbsp;000 pasos) se corrió en CPU local.</p>
+</section>

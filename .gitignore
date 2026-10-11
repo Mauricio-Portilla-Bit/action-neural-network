@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.DS_Store
+.ipynb_checkpoints/
+
+# pesos y registros de entrenamiento: se regeneran con experiments.py
+results/*.pt
+results/*.log
+
+# videos
+video_coste/
+*.mp4
+*.srt
